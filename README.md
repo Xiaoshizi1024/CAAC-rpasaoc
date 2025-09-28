@@ -7,6 +7,9 @@
 
 ## 功能说明       
 1. 合格证图片（将两张拼接成了一张）
-2. 一个Excel文件（uav_cert_status_correct_range.xlsx）
+3. 一个Excel文件（uav_cert_status_correct_range.xlsx）
 保存的内容有：合格证编号、完成URL、状态、处理结果、图片合并结果、耗时（秒）。  
 其中“合格证编号”为URL最终的编号，比如说上面的编号为：“BZSQ9142403001”。作为唯一项来确定爬取的内容。
+
+合格证图片如下：   
+<img width="892" height="2524" alt="BZSQ9142403001_merged" src="https://github.com/user-attachments/assets/cf369097-8911-4eb8-a292-085435e79f6d" />
