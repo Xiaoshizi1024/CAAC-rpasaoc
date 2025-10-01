@@ -42,7 +42,8 @@ REPROCESS_STATUSES = {
     "未处理(错误: Message: Unable to o)",
     "未处理(错误: Message: unknown err)",
     "未处理(错误: [WinError 10054] 远程主)",
-    "未处理(错误: Message: invalid ses)"
+    "未处理(错误: Message: invalid ses)"，
+    "未处理(错误: ('Connection aborted)"
 }
 
 # 需要重新处理的图片合并结果
