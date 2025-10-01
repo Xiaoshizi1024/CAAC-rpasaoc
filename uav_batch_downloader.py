@@ -22,7 +22,7 @@ from io import BytesIO
 import openpyxl
 from openpyxl.styles import Alignment
 
-# 基础配置
+# 基础配置（关键修改：FAILED_STATUS新增“未找到合格证”）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_URL = "https://uom.caac.gov.cn/#/uav-sczs-show/"  # 基础URL
 EXCEL_FILENAME = "uav_cert_status_correct_range.xlsx"
@@ -32,7 +32,8 @@ IMG_XPATHS = [
 ]
 # 核心修改：设置为False，合并后自动删除单张原始图片
 KEEP_SINGLE_IMAGES = False  # 仅保留合并后的图片，不保存合并前的单张图片
-FAILED_STATUS = {"未找到状态", "获取失败"}  # 完全获取失败的状态集合
+# 关键修改：新增“未找到合格证”，用于跳过图片操作
+FAILED_STATUS = {"未找到状态", "获取失败", "未找到合格证"}  # 完全获取失败/无需处理图片的状态集合
 # 需要重新处理的状态列表
 REPROCESS_STATUSES = {
     "获取失败",
@@ -42,7 +43,7 @@ REPROCESS_STATUSES = {
     "未处理(错误: Message: Unable to o)",
     "未处理(错误: Message: unknown err)",
     "未处理(错误: [WinError 10054] 远程主)",
-    "未处理(错误: Message: invalid ses)"，
+    "未处理(错误: Message: invalid ses)",
     "未处理(错误: ('Connection aborted)"
 }
 
@@ -195,37 +196,71 @@ def update_excel(row_data, row_number=None):
 
 
 def extract_cert_status(driver):
-    """提取合格证状态"""
-    status_xpath = '//*[@id="registerMain"]/div[1]/span[1]'
-    
+    """提取合格证状态（支持已启用/已撤销/已注销等6种状态识别，含未找到合格证场景）"""
+    # 1. 父容器XPath（所有状态span的共同父级，精准匹配HTML结构）
+    parent_xpath = '//*[@id="registerMain"]/div[1]'
+    # 2. 状态映射表：i标签class -> 对应状态文本（完全匹配HTML中的6种状态）
+    status_map = {
+        "iconType1 el-icon-success": "已启用",
+        "iconType2 el-icon-error": "已注销",
+        "iconType3 el-icon-warning": "已撤销",
+        "iconType4 el-icon-remove": "已暂停",
+        "iconType5 el-icon-info": "审批中",
+        "": "不予颁发"  # 对应“不予颁发”的空class
+    }
+
     try:
-        status_element = WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, status_xpath))
+        # 第一步：定位父容器（确保父元素存在，排除“未找到合格证”场景）
+        parent_element = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.XPATH, parent_xpath))
         )
         
-        text_content = status_element.get_attribute("textContent").strip()
-        inner_text = status_element.get_attribute("innerText").strip()
-        direct_text = status_element.text.strip()
-        
-        status_candidates = [text_content, inner_text, direct_text]
-        for text in status_candidates:
-            cleaned_text = re.sub(r'\s+', '', text)
-            if cleaned_text == "已启用":
-                return "已启用"
-            elif cleaned_text == "已撤销":
-                return "已撤销"
-        
-        return f"未知({status_candidates[0][:10]})"
+        # 检查父容器是否为空（对应“找不到不合格证”的HTML结构：<div class="p" style="height: 45px;"></div>）
+        parent_html = parent_element.get_attribute("innerHTML").strip()
+        if not parent_html:  # 父容器内无任何span或文本，即“未找到合格证”
+            return "未找到合格证"
+
+        # 第二步：遍历父容器内所有span，匹配状态
+        # 查找父容器下所有包含i标签的span（所有状态都在这类span中）
+        status_spans = parent_element.find_elements(By.XPATH, './/span[./i]')
+        if status_spans:
+            for span in status_spans:
+                # 获取span下i标签的class（用于匹配状态）
+                i_tag = span.find_element(By.XPATH, './i')
+                i_class = i_tag.get_attribute("class").strip()
+                # 获取span的display状态（判断是否显示）
+                span_style = span.get_attribute("style").strip()
+                
+                # 关键判断：i标签class在映射表中，且span非隐藏（display != none）
+                if i_class in status_map and "display: none" not in span_style:
+                    return status_map[i_class]  # 返回匹配的状态（如“已撤销”）
+
+        # 第三步：特殊情况：所有span都隐藏（理论上不会发生，但做兼容处理）
+        return "未知(所有状态隐藏)"
+
     except Exception as e:
+        # 降级方案：当元素定位失败时，通过页面源码补充判断
         try:
             page_source = driver.page_source
-            if re.search(r'已启用', page_source):
-                return "已启用(源码)"
-            elif re.search(r'已撤销', page_source):
-                return "已撤销(源码)"
-            else:
-                return "未找到状态"
+            # 先判断是否为“未找到合格证”（父容器为空）
+            if re.search(f'{parent_xpath[2:]}.*innerHTML=""', page_source):
+                return "未找到合格证(源码)"
+            
+            # 再遍历状态映射表，匹配其他状态
+            for i_class, status_text in status_map.items():
+                if i_class:  # 非“不予颁发”（其i标签无class）
+                    if re.search(f'{i_class}.*{status_text}', page_source) and \
+                       not re.search(f'{status_text}.*display: none', page_source):
+                        return f"{status_text}(源码)"
+                else:  # 处理“不予颁发”（i标签无class，直接匹配文本）
+                    if re.search(f'{status_text}', page_source) and \
+                       not re.search(f'{status_text}.*display: none', page_source):
+                        return f"{status_text}(源码)"
+            
+            # 源码中无任何状态信息
+            return "获取失败"
         except:
+            # 完全无法获取任何信息，返回最终失败状态
             return "获取失败"
 
 
@@ -256,7 +291,7 @@ def process_single_cert(cert_number, wait_time=10):
         result["status"] = extract_cert_status(driver)
         print(f"状态提取结果: {result['status']}")
         
-        # 状态完全获取失败则跳过图片操作
+        # 关键逻辑：状态为“未找到合格证”等失败状态时，跳过图片操作（提升效率）
         if result["status"] in FAILED_STATUS:
             print(f"⚠️  状态属于完全获取失败，跳过图片下载与合并")
             result["merge_result"] = "跳过（状态失败）"
