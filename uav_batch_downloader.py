@@ -1,4 +1,10 @@
-print("=== 无人机合格证批量处理系统（仅保留合并后图片版）===")
+# 作者：[你的姓名/昵称]
+# 联系方式：[可选，如邮箱]
+# 版本：1.0.0
+# 日期：2025-10-01
+# 描述：无人机合格证批量处理系统，支持顺序获取、逐个获取和自动补充错误记录，自动下载并合并图片
+print("=== uom运营合格证批量处理系统===")
+print("作者：玩无人机的小狮子")
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -10,6 +16,8 @@ import traceback
 import time
 import base64
 import re
+import subprocess  # 新增：用于调用系统命令清理进程
+import platform    # 新增：用于判断操作系统（确保仅Windows生效）
 from PIL import Image
 from io import BytesIO
 import openpyxl
@@ -26,6 +34,50 @@ IMG_XPATHS = [
 # 核心修改：设置为False，合并后自动删除单张原始图片
 KEEP_SINGLE_IMAGES = False  # 仅保留合并后的图片，不保存合并前的单张图片
 FAILED_STATUS = {"未找到状态", "获取失败"}  # 完全获取失败的状态集合
+# 需要重新处理的状态列表
+REPROCESS_STATUSES = {
+    "获取失败",
+    "未处理(错误: Message: session not)",
+    "未处理(错误: HTTPConnectionPool(h)",
+    "未处理(错误: Message: Service C:\\)",
+    "未处理(错误: Message: Unable to o)"
+}
+# 需要重新处理的图片合并结果
+REPROCESS_MERGE_RESULTS = {"无图片", "失败"}
+
+
+# 新增：清理Chrome残留进程（针对Windows系统的“Google Chrome for Testing”）
+def clean_chrome_processes():
+    """清理Windows系统中残留的Chrome测试版进程，避免内存泄漏"""
+    # 仅在Windows系统执行（避免跨平台问题）
+    if platform.system() != "Windows":
+        return
+    
+    # 需要清理的进程名（精准匹配“Google Chrome for Testing”及关联驱动进程）
+    process_names = [
+        "Google Chrome for Testing.exe",
+        "chromedriver.exe"  # 额外清理可能残留的ChromeDriver进程
+    ]
+    
+    print("\n--- 开始清理Chrome残留进程 ---")
+    for proc_name in process_names:
+        try:
+            # 调用Windows taskkill命令：/F强制结束，/IM按进程名匹配
+            subprocess.run(
+                ["taskkill", "/F", "/IM", proc_name],
+                stdout=subprocess.PIPE,  # 隐藏命令输出
+                stderr=subprocess.PIPE,
+                shell=True,
+                check=True
+            )
+            print(f"✅ 成功清理进程：{proc_name}")
+        except subprocess.CalledProcessError:
+            # 进程不存在时会报错，属于正常情况，无需抛出异常
+            print(f"ℹ️  未找到残留进程：{proc_name}")
+        except Exception as e:
+            # 捕获其他异常（如权限问题），避免程序中断
+            print(f"⚠️  清理进程{proc_name}失败：{str(e)[:30]}")
+    print("--- 进程清理完成 ---\n")
 
 
 def merge_images(image_paths, output_path, direction='vertical'):
@@ -102,7 +154,7 @@ def init_excel(processing_desc):
     ws.column_dimensions['A'].width = 8
     ws.column_dimensions['B'].width = 22
     ws.column_dimensions['C'].width = 60
-    ws.column_dimensions['D'].width = 10
+    ws.column_dimensions['D'].width = 30  # 加宽以适应长错误信息
     ws.column_dimensions['E'].width = 10
     ws.column_dimensions['F'].width = 20
     ws.column_dimensions['G'].width = 10
@@ -111,13 +163,18 @@ def init_excel(processing_desc):
     return excel_path
 
 
-def update_excel(row_data):
-    """更新Excel结果"""
+def update_excel(row_data, row_number=None):
+    """更新Excel结果，可指定行号进行更新"""
     try:
         excel_path = os.path.join(SCRIPT_DIR, EXCEL_FILENAME)
         wb = openpyxl.load_workbook(excel_path)
         ws = wb["处理结果"]
-        next_row = ws.max_row + 1
+        
+        # 如果指定了行号则更新该行，否则添加新行
+        if row_number:
+            next_row = row_number
+        else:
+            next_row = ws.max_row + 1
         
         for col, value in enumerate(row_data, 1):
             ws.cell(row=next_row, column=col, value=value)
@@ -266,8 +323,13 @@ def process_single_cert(cert_number, wait_time=10):
         result["merge_result"] = "中断"
         result["success"] = False
     finally:
+        # 1. 优先关闭浏览器实例
         if driver:
             driver.quit()
+            print(f"已关闭当前Chrome浏览器实例")
+        # 2. 新增：清理可能残留的Chrome进程（关键修复内存泄漏）
+        clean_chrome_processes()
+        # 3. 计算耗时并返回结果
         result["time"] = round(time.time() - start_time, 2)
         return result
 
@@ -301,20 +363,58 @@ def get_valid_number(prompt, min_value):
             print("输入错误！请输入有效的整数")
 
 
+def get_reprocess_cert_numbers():
+    """从Excel文件中读取需要重新处理的合格证编号"""
+    excel_path = os.path.join(SCRIPT_DIR, EXCEL_FILENAME)
+    if not os.path.exists(excel_path):
+        print(f"错误：未找到Excel文件 {excel_path}")
+        return []
+    
+    try:
+        wb = openpyxl.load_workbook(excel_path)
+        ws = wb["处理结果"]
+        
+        # 存储需要重新处理的编号及其行号
+        reprocess_items = []
+        
+        # 从第3行开始读取数据（前两行是标题和表头）
+        for row in range(3, ws.max_row + 1):
+            cert_number = ws.cell(row=row, column=2).value
+            status = ws.cell(row=row, column=4).value
+            merge_result = ws.cell(row=row, column=6).value
+            
+            # 检查是否需要重新处理
+            need_reprocess = False
+            if status in REPROCESS_STATUSES:
+                need_reprocess = True
+            elif merge_result in REPROCESS_MERGE_RESULTS:
+                need_reprocess = True
+                
+            if need_reprocess and cert_number:
+                reprocess_items.append((cert_number, row))
+        
+        print(f"发现 {len(reprocess_items)} 条需要重新处理的记录")
+        return reprocess_items
+    except Exception as e:
+        print(f"读取Excel文件失败: {str(e)}")
+        return []
+
+
 def main():
-    # 新增：1. 处理模式选择
+    # 处理模式选择
     print("\n请选择处理模式：")
     print("1. 顺序获取（按编号范围批量生成，如2401001-2401010）")
     print("2. 逐个获取（手动输入错误编号补充，用英文逗号分隔）")
+    print("3. 自动获取（自动补充xlsx表内错误）")
     
     # 验证模式选择
     while True:
-        mode_choice = input("请输入1或2选择模式：").strip()
-        if mode_choice in ["1", "2"]:
+        mode_choice = input("请输入1、2或3选择模式：").strip()
+        if mode_choice in ["1", "2", "3"]:
             break
-        print("输入无效！请仅输入1或2")
+        print("输入无效！请仅输入1、2或3")
 
-    # 新增：2. 按模式获取合格证编号列表及处理描述
+    # 按模式获取合格证编号列表及处理描述
     if mode_choice == "1":
         # 原有顺序模式逻辑
         month_prefix = get_valid_month_prefix()
@@ -323,8 +423,11 @@ def main():
         cert_numbers = generate_cert_numbers(start_num, end_num, month_prefix)
         processing_desc = (f"模式：顺序获取 | 年月份前缀：{month_prefix} | 编号范围：{start_num}-{end_num} "
                           f"| 图片策略：仅保留合并后图片")
-    else:
-        # 新增逐个模式逻辑：解析逗号分隔的编号
+        # 对于顺序模式，存储的是编号列表
+        process_items = [(num, None) for num in cert_numbers]
+        
+    elif mode_choice == "2":
+        # 逐个模式逻辑：解析逗号分隔的编号
         while True:
             input_str = input("\n请输入多个合格证编号（用英文逗号分隔，如BZSQ9142401001,BZSQ9142401003）：").strip()
             # 分割+去空格+去重（保留输入顺序）
@@ -335,6 +438,19 @@ def main():
             print("输入无效！请至少输入1个编号，且编号间用英文逗号分隔")
         processing_desc = (f"模式：逐个获取 | 编号数量：{len(cert_numbers)} | 编号列表：{','.join(cert_numbers)} "
                           f"| 图片策略：仅保留合并后图片")
+        # 对于逐个模式，存储的是编号列表
+        process_items = [(num, None) for num in cert_numbers]
+        
+    else:  # mode_choice == "3"
+        # 自动获取模式：从Excel读取需要重新处理的编号
+        process_items = get_reprocess_cert_numbers()
+        if not process_items:
+            print("没有需要重新处理的记录，程序退出")
+            return
+            
+        cert_numbers = [item[0] for item in process_items]
+        processing_desc = (f"模式：自动获取 | 重新处理数量：{len(cert_numbers)} | "
+                          f"图片策略：仅保留合并后图片")
 
     # 显示参数确认
     print(f"\n=== 参数确认 ===")
@@ -342,48 +458,43 @@ def main():
 
     # 初始化Excel（传入模式描述）
     excel_path = init_excel(processing_desc)
-    total = len(cert_numbers)
+    total = len(process_items)
     success_count = 0
     fail_count = 0
 
-    # 结果文件初始化
-    success_file = os.path.join(SCRIPT_DIR, "success_urls.txt")
-    fail_file = os.path.join(SCRIPT_DIR, "fail_urls.txt")
-    open(success_file, "w").close()
-    open(fail_file, "w").close()
-
     print(f"\n开始处理: 共{total}个链接")
-    print(f"链接示例: {BASE_URL}{cert_numbers[0]}")
+    if total > 0:
+        print(f"链接示例: {BASE_URL}{process_items[0][0]}")
 
-    # 逐个处理编号（逻辑不变）
-    for i, cert_number in enumerate(cert_numbers, 1):
+    # 逐个处理编号
+    for i, (cert_number, row_number) in enumerate(process_items, 1):
         print(f"\n===== 处理 {i}/{total}: {cert_number} =====")
         result = process_single_cert(cert_number, wait_time=10)
 
-        # 更新统计及结果文件
+        # 更新统计
         if result["success"]:
             success_count += 1
-            with open(success_file, "a", encoding="utf-8") as f:
-                f.write(f"{result['url']}\n")
         else:
             fail_count += 1
-            with open(fail_file, "a", encoding="utf-8") as f:
-                f.write(f"{result['url']}\n")
 
-        # 更新Excel
+        # 更新Excel，自动模式下更新原有行，其他模式添加新行
         update_excel([
-            i,
+            i if row_number is None else row_number - 2,  # 保持原有序号
             cert_number,
             result["url"],
             result["status"],
             "成功" if result["success"] else "失败",
             result["merge_result"],
             result["time"]
-        ])
+        ], row_number)
 
         # 进度提示
         print(f"状态: {result['status']} | 合并: {result['merge_result']} | 耗时: {result['time']}秒 | 结果: {'成功' if result['success'] else '失败'}")
         print(f"进度: 成功{success_count}, 失败{fail_count}, 总计{success_count+fail_count}/{total}")
+
+    # 新增：程序结束前再次清理进程（双重保障）
+    print("\n--- 程序即将结束，最终清理进程 ---")
+    clean_chrome_processes()
 
     # 完成总结
     print("\n===== 处理完成 =====")
