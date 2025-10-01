@@ -40,8 +40,12 @@ REPROCESS_STATUSES = {
     "未处理(错误: Message: session not)",
     "未处理(错误: HTTPConnectionPool(h)",
     "未处理(错误: Message: Service C:\\)",
-    "未处理(错误: Message: Unable to o)"
+    "未处理(错误: Message: Unable to o)",
+    "未处理(错误: Message: unknown err)",
+    "未处理(错误: [WinError 10054] 远程主)",
+    "未处理(错误: Message: invalid ses)"
 }
+
 # 需要重新处理的图片合并结果
 REPROCESS_MERGE_RESULTS = {"无图片", "失败"}
 
